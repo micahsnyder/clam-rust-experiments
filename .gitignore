@@ -1,1 +1,4 @@
 /rs-phash/target
+Cargo.lock
+.vscode
+
