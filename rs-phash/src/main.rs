@@ -5,6 +5,7 @@ use image::imageops::FilterType::Lanczos3;
 use rustdct::DctPlanner;
 use std::path::{Path, PathBuf};
 use structopt::StructOpt;
+use transpose::transpose;
 
 #[derive(Debug, StructOpt)]
 struct Opt {
@@ -25,9 +26,14 @@ pub fn main() -> Result<()> {
     Ok(())
 }
 
-/// # Modifications made to Mickey's algorithm
+/// Calculate a fuzzy image hash.
 ///
-/// 1️⃣First, I found that `image.grayscale() uses different RGB coefficients than
+/// This algorithm attempts to reproduce the results of the `phash()` function
+/// from the Python `imagehash` package.
+///
+/// # Notes
+///
+/// 1) I found that `image.grayscale() uses different RGB coefficients than
 /// the python `image.convert("L"). The docs for PIL.Image.convert() state:
 ///
 ///     When translating a color image to greyscale (mode "L"),
@@ -35,8 +41,8 @@ pub fn main() -> Result<()> {
 ///
 ///         L = R * 299/1000 + G * 587/1000 + B * 114/1000
 ///
-/// In a local clone of the image-rs crate, this change manages near-identical
-/// results to the Python "L" mode:
+/// You can get near-identical** grayscale results by making a clone (or forking)
+/// the image-rs crate, and changing the coefficients to match those above:
 ///
 ///     diff --git a/src/color.rs b/src/color.rs
 ///     index 78b5c587..92c99337 100644
@@ -52,68 +58,32 @@ pub fn main() -> Result<()> {
 ///      #[inline]
 ///      fn rgb_to_luma<T: Primitive>(rgb: &[T]) -> T {
 ///
-/// I don't think this👆 change is really required⭐, but it helps for determining
-/// how things change later on. Note that I say "near-identical" because rounding
+/// This change isn't really required, but it helps when debugging to determine
+/// differences between the implementations.
+///
+/// **Note that I say "near-identical" because rounding
 /// appears to be slightly different and values are sometimes off-by-one.
 ///
-/// ⭐I tested later using the original image crate without the greyscale()
-/// modifications and it does indeed provide the same "phash" in the end. 👍
+/// 2) scipy.fftpack.dct behaves differently on twodimensional arrays than
+/// single-dimensional arrays.
+/// See https://docs.scipy.org/doc/scipy/reference/generated/scipy.fftpack.dct.html:
 ///
-/// 2️⃣Second, I found that the Python imagehash.phash_simple() function is doing a
-/// DCT-2 transform on the a 2-dimensionals 32x32 array. scipy.fftpack.dct behaves
-/// differently on twodimensional arrays than single-dimensional arrays.
+///     Note the optional "axis" argument:
+///         Axis along which the dct is computed; the default is over the last axis
+///         (i.e., axis=-1).
 ///
-/// Read https://docs.scipy.org/doc/scipy/reference/generated/scipy.fftpack.dct.html
+/// For the Python `imagehash` package:
+/// - The `phash_simple()` function is doing a DCT-2 transform on a 2-dimensionals
+/// 32x32 array which means, just on the 2nd axis (just the rows).
+/// - The `phash()` function is doing a 2D DCT-2 transform, by running the DCT-2 on
+/// both X and Y axis, which is the same as transposing before or after each
+/// DCT-2 call.
 ///
-/// Note the optional "axis" argument:
-///     Axis along which the dct is computed; the default is over the last axis
-///     (i.e., axis=-1).
+/// 3) I observed that the DCT2 results from Python are consistently 2x greater
+/// than those from Rust. If I multiply every value by 2 after running the DCT,
+/// then the results are the same.
 ///
-/// With this change, I was able to get identical DCT results to the Rust DCT-2
-/// of the flat 1024 byte array:
-///
-///     diff --git a/imagehash.py b/imagehash.py
-///     index 31d6307..0ebe12c 100644
-///     --- a/imagehash.py
-///     +++ b/imagehash.py
-///     @@ -228,7 +228,9 @@ def phash_simple(image, hash_size=8, highfreq_factor=4):
-///             img_size = hash_size * highfreq_factor
-///             image = image.convert("L").resize((img_size, img_size), Image.ANTIALIAS)
-///             pixels = numpy.asarray(image)
-///     +       pixels = pixels.flatten()
-///             dct = scipy.fftpack.dct(pixels)
-///     +       dct = list(map(lambda x: x/2, dct))
-///             dctlowfreq = dct[:hash_size, 1:hash_size+1]
-///             avg = dctlowfreq.mean()
-///             diff = dctlowfreq > avg
-///
-/// I'm not sure why I had to divide each value by 2.
-///
-/// But of course we don't want to modify the Python one. I'm just showing that
-/// the DCT-2 calculation works the same when flattened, but is different on the
-/// 2-dimensional array.
-///
-/// What we need to do is compute the DCT-2 in Rust over the last axis, the same
-/// way it is done in Python when we don't flatten the array. We can do this by
-/// doing a DCT of each 32 byte chunk:
-///
-/// ```rust
-/// let dct2 = DctPlanner::new().plan_dct2(32);
-/// for mut chunk in imgbuff_f64.chunks_mut(32) {
-///     dct2.process_dct2(&mut chunk);
-/// }
-///
-/// let _: () = imgbuff_f64
-///     .iter_mut()
-///     .map(|f| {
-///         *f = *f * 2.0;
-///     })
-///     .collect();
-/// ```
-/// As before, we have to multiply each value by 2.0 to match the DCT2 results
-/// seen in the Python scipy.fftpack.dct() implementation. 🤷‍♀️
-///
-/// 3️⃣Third, we need to get a subset of the 2-D array representing the lower
+/// 4) We need to get a subset of the 2-D array representing the lower
 /// frequencies of the image, the same way the Python implementation does it.
 ///
 /// The way the python implementation does this is with this line:
@@ -123,18 +93,13 @@ pub fn main() -> Result<()> {
 ///
 /// You can't actually do that with a Python array of arrays... this is numpy
 /// 2-D array manipulation magic, where you can index 2-D arrays in slices.
-/// Like this:
+/// It works like this:
 /// ```ipython3
 /// In [0]: x = [[0, 1, 2, 3, 4], [4, 5, 6, 7, 8], [8, 9, 10, 11, 12], [12, 13, 14, 15, 16], [16, 17, 18, 19, 20]]
-///
 /// In [1]: h = 3
-///
 /// In [2]: n = np.asarray(x)
-///
 /// In [3]: lf = n[:h, 1:h+1]
-///
 /// In [4]: n
-/// Out[4]:
 /// array([[ 0,  1,  2,  3,  4],
 ///        [ 4,  5,  6,  7,  8],
 ///        [ 8,  9, 10, 11, 12],
@@ -142,20 +107,12 @@ pub fn main() -> Result<()> {
 ///        [16, 17, 18, 19, 20]])
 ///
 /// In [5]: lf
-/// Out[5]:
 /// array([[ 1,  2,  3],
 ///        [ 5,  6,  7],
 ///        [ 9, 10, 11]])
 /// ```
 ///
-/// Mickey's implementation here was mostly right, except it was including the
-/// first column and then later manually excluding the very first value from the
-/// sum & average calculation. With a very small tweak, this works correctly to
-/// skip the entire first column and include the 8th column.
-///
-/// The rest of the hash calculation worked correctly. With these changes, this
-/// function prints hashes that match imagehash.phash_simple().
-///
+/// We can do something similar, manually, to get the low-frequency selection.
 fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -> Result<()> {
     // Open image given a file path.
     let image = image::io::Reader::open(&path)
@@ -173,44 +130,67 @@ fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -
     // Shrink to a 32x32 (1024 pixel) image.
     let image_small = image::DynamicImage::resize_exact(&image_gs, 32, 32, Lanczos3);
 
+    // Drop the alpha channel.
+    let image_rgb8 = image_small.to_luma8();
+
     // Convert the data to a Vec of 64-bit floats.
-    let imgbuff_u8 = image_small.into_bytes();
+    let imgbuff_u8 = image_rgb8.to_vec();
     let mut imgbuff_f64: Vec<f64> = imgbuff_u8.into_iter().map(|x| x as f64).collect();
 
-    // Compute DCT-2 in-place for each row of 32 pixels.
+    //
+    // Compute a 2D DCT-2 in-place.
+    //
     let dct2 = DctPlanner::new().plan_dct2(32);
-    for mut chunk in imgbuff_f64.chunks_mut(32) {
-        dct2.process_dct2(&mut chunk);
+
+    // Use a scratch space so we can transpose and run DCT's without allocating any extra space.
+    // We'll switch back and forth between the buffer for the original small image (buffer1) and the scratch buffer (buffer2).
+    let mut buffer1: &mut [f64] = imgbuff_f64.as_mut_slice();
+    let mut buffer2: &mut [f64] = &mut [0.0; 1024];
+
+    // Transpose the image so we can run DCT on the X axis (columns) first.
+    transpose(buffer1, &mut buffer2, 32, 32);
+
+    // Run DCT2 on the columns.
+    for (row_in, row_out) in buffer2.chunks_mut(32).zip(buffer1.chunks_mut(32)) {
+        dct2.process_dct2_with_scratch(row_in, row_out);
     }
-
     // Multiply each value x2, to match results from scipy.fftpack.dct() implementation.
-    let _: () = imgbuff_f64
-        .iter_mut()
-        .map(|f| {
-            *f = *f * 2.0;
-        })
-        .collect();
+    // Note: Unsure why this is required, but it is.
+    buffer2.iter_mut().for_each(|f| *f *= 2.0);
 
-    // Construct a DCT low frequency vector using the top=left most 8x8 terms,
-    // excluding the 0'th column.
+    // Transpose the image back so we can run DCT on the Y axis (rows).
+    transpose(buffer2, &mut buffer1, 32, 32);
+
+    // Run DCT2 on the rows.
+    for (row_in, row_out) in buffer1.chunks_mut(32).zip(buffer2.chunks_mut(32)) {
+        dct2.process_dct2_with_scratch(row_in, row_out);
+    }
+    // Multiply each value x2, to match results from scipy.fftpack.dct() implementation.
+    // Note: Unsure why this is required, but it is.
+    buffer1.iter_mut().for_each(|f| *f *= 2.0);
+
+    //
+    // Construct a DCT low frequency vector using the top-left most 8x8 values.
+    //
     let mut dct_low_freq: Vec<f64> = Vec::new();
-
     for i in 0..8 {
         let idx = i * 32;
-        dct_low_freq.extend_from_slice(&imgbuff_f64[idx + 1..idx + 1 + 8]);
+        dct_low_freq.extend_from_slice(&buffer1[idx..idx + 8]);
     }
 
-    // Calculate average (mean) of the DCT low frequency vector
-    let sum: f64 = dct_low_freq.iter().sum();
-    let mean = sum / (dct_low_freq.len() as f64);
+    // Calculate average (median) of the DCT low frequency vector.
+    let mut dct_low_freq_copy = dct_low_freq.clone();
+    dct_low_freq_copy.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mid = dct_low_freq_copy.len() / 2;
+    let median = dct_low_freq_copy[mid];
 
-    // Construct hash vector by reducing DCT values to 1 or 0 by comparing terms vs mean
+    // Construct hash vector by reducing DCT values to 1 or 0 by comparing terms vs median.
     let hashvec: Vec<u64> = dct_low_freq
         .into_iter()
-        .map(|x| if x > mean { 1 } else { 0 })
+        .map(|x| if x > median { 1 } else { 0 })
         .collect();
 
-    // Construct hash integer from bits
+    // Construct hash integer from bits.
     let hash: u64 = hashvec.iter().fold(0, |res, &bit| (res << 1) ^ bit);
 
     if include_filename && debug {
