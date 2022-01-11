@@ -214,9 +214,9 @@ fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -
     let hash: u64 = hashvec.iter().fold(0, |res, &bit| (res << 1) ^ bit);
 
     if include_filename && debug {
-        println!("{:?}: {:#x}", &path, hash);
+        println!("{:?}: {:08x}", &path, hash);
     } else {
-        println!("{:#x}", hash);
+        println!("{:08x}", hash);
     }
     Ok(())
 }
