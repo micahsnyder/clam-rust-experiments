@@ -170,15 +170,20 @@ fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -
     buffer1.iter_mut().for_each(|f| *f *= 2.0);
 
     //
-    // Construct a DCT low frequency vector using the top-left most 8x8 values.
+    // Construct a DCT low frequency vector using the top-left most 8x8 values of the 32x32 DCT array.
     //
-    let mut dct_low_freq: Vec<f64> = Vec::new();
-    buffer1.chunks(32).take(8).for_each(|chunk| {
-        chunk
-            .chunks(8)
-            .take(1)
-            .for_each(|chunk| dct_low_freq.extend_from_slice(chunk))
-    });
+    let dct_low_freq = buffer1
+        // 2D array is 32-elements wide.
+        .chunks(32)
+        // Grab the first 8 rows.
+        .take(8)
+        // But only take the first 8 elements (columns) from each row.
+        .map(|chunk| chunk.chunks(8).take(1))
+        // Flatten the 8x8 selection down to a vector of f64's.
+        .flatten()
+        .flatten()
+        .copied()
+        .collect::<Vec<f64>>();
 
     // Calculate average (median) of the DCT low frequency vector.
     let mut dct_low_freq_copy = dct_low_freq.clone();
