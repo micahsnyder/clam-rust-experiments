@@ -173,9 +173,12 @@ fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -
     // Construct a DCT low frequency vector using the top-left most 8x8 values.
     //
     let mut dct_low_freq: Vec<f64> = Vec::new();
-    (0..256)
-        .step_by(32)
-        .for_each(|idx| dct_low_freq.extend_from_slice(&buffer1[idx..idx + 8]));
+    buffer1.chunks(32).take(8).for_each(|chunk| {
+        chunk
+            .chunks(8)
+            .take(1)
+            .for_each(|chunk| dct_low_freq.extend_from_slice(chunk))
+    });
 
     // Calculate average (median) of the DCT low frequency vector.
     let mut dct_low_freq_copy = dct_low_freq.clone();
