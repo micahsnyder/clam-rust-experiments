@@ -88,7 +88,7 @@ pub fn main() -> Result<()> {
 ///
 /// The way the python implementation does this is with this line:
 /// ```python
-/// dctlowfreq = dct[:hash_size, 1:hash_size+1]
+/// dctlowfreq = dct[:hash_size, :hash_size]
 /// ```
 ///
 /// You can't actually do that with a Python array of arrays... this is numpy
@@ -107,9 +107,9 @@ pub fn main() -> Result<()> {
 ///        [16, 17, 18, 19, 20]])
 ///
 /// In [5]: lf
-/// array([[ 1,  2,  3],
-///        [ 5,  6,  7],
-///        [ 9, 10, 11]])
+/// array([[ 0,  1,  2],
+///        [ 4,  5,  6],
+///        [ 8,  9, 10]])
 /// ```
 ///
 /// We can do something similar, manually, to get the low-frequency selection.
@@ -173,10 +173,9 @@ fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -
     // Construct a DCT low frequency vector using the top-left most 8x8 values.
     //
     let mut dct_low_freq: Vec<f64> = Vec::new();
-    for i in 0..8 {
-        let idx = i * 32;
-        dct_low_freq.extend_from_slice(&buffer1[idx..idx + 8]);
-    }
+    (0..256)
+        .step_by(32)
+        .for_each(|idx| dct_low_freq.extend_from_slice(&buffer1[idx..idx + 8]));
 
     // Calculate average (median) of the DCT low frequency vector.
     let mut dct_low_freq_copy = dct_low_freq.clone();
