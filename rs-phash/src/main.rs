@@ -115,7 +115,7 @@ pub fn main() -> Result<()> {
 /// We can do something similar, manually, to get the low-frequency selection.
 fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -> Result<()> {
     // Open image given a file path.
-    let image = image::io::Reader::open(&path)
+    let og_image = image::io::Reader::open(&path)
         .map_err(|e| anyhow!("opening {:?}: {}", &path, e))?
         // Guess at the format, in case the file extension lies.
         .with_guessed_format()
@@ -125,7 +125,7 @@ fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -
         .map_err(|e| anyhow!("decoding {:?}: {}", &path, e))?;
 
     // Convert image to grayscale.
-    let image_gs = image.grayscale();
+    let image_gs = og_image.grayscale();
 
     // Shrink to a 32x32 (1024 pixel) image.
     let image_small = image::DynamicImage::resize_exact(&image_gs, 32, 32, Lanczos3);
@@ -188,8 +188,7 @@ fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -
     // Calculate average (median) of the DCT low frequency vector.
     let mut dct_low_freq_copy = dct_low_freq.clone();
     dct_low_freq_copy.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let mid = dct_low_freq_copy.len() / 2;
-    let median = dct_low_freq_copy[mid];
+    let median: f64 = (dct_low_freq_copy[31] + dct_low_freq_copy[32]) / 2.0;
 
     // Construct hash vector by reducing DCT values to 1 or 0 by comparing terms vs median.
     let hashvec: Vec<u64> = dct_low_freq
