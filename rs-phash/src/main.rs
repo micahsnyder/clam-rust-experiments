@@ -1,9 +1,16 @@
 extern crate image;
 
+use num_traits::{FromPrimitive, NumCast, ToPrimitive, Zero};
+
 use anyhow::{anyhow, Result};
-use image::imageops::FilterType::Lanczos3;
+use image::{
+    imageops::FilterType::Lanczos3, DynamicImage, GrayImage, ImageBuffer, Luma, Pixel, Rgb,
+};
 use rustdct::DctPlanner;
-use std::path::{Path, PathBuf};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
 use structopt::StructOpt;
 use transpose::transpose;
 
@@ -58,11 +65,12 @@ pub fn main() -> Result<()> {
 ///      #[inline]
 ///      fn rgb_to_luma<T: Primitive>(rgb: &[T]) -> T {
 ///
-/// This change isn't really required, but it helps when debugging to determine
-/// differences between the implementations.
-///
 /// **Note that I say "near-identical" because rounding
 /// appears to be slightly different and values are sometimes off-by-one.
+///
+/// This change doesn't appear to be required to match the phash_simple()
+/// function, but to match the phash() function where the median is used instead
+/// of the mean -- this change is required.
 ///
 /// 2) scipy.fftpack.dct behaves differently on twodimensional arrays than
 /// single-dimensional arrays.
@@ -124,18 +132,20 @@ fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -
         .decode()
         .map_err(|e| anyhow!("decoding {:?}: {}", &path, e))?;
 
+    // Drop the alpha channel (if exists).
+    let buff_rgb8 = og_image.to_rgb8();
+
     // Convert image to grayscale.
-    let image_gs = og_image.grayscale();
+    let buff_luma8 = grayscale(&buff_rgb8);
+
+    // Convert back to a DynamicImage type so we can resize it.
+    let image_gs = DynamicImage::ImageLuma8(buff_luma8);
 
     // Shrink to a 32x32 (1024 pixel) image.
     let image_small = image::DynamicImage::resize_exact(&image_gs, 32, 32, Lanczos3);
 
-    // Drop the alpha channel.
-    let image_rgb8 = image_small.to_luma8();
-
-    // Convert the data to a Vec of 64-bit floats.
-    let imgbuff_u8 = image_rgb8.to_vec();
-    let mut imgbuff_f64: Vec<f64> = imgbuff_u8.into_iter().map(|x| x as f64).collect();
+    // Convert the data to a Vec of floats.
+    let mut imgbuff_f32 = image_small.to_luma32f().into_raw();
 
     //
     // Compute a 2D DCT-2 in-place.
@@ -144,8 +154,8 @@ fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -
 
     // Use a scratch space so we can transpose and run DCT's without allocating any extra space.
     // We'll switch back and forth between the buffer for the original small image (buffer1) and the scratch buffer (buffer2).
-    let mut buffer1: &mut [f64] = imgbuff_f64.as_mut_slice();
-    let mut buffer2: &mut [f64] = &mut [0.0; 1024];
+    let mut buffer1: &mut [f32] = imgbuff_f32.as_mut_slice();
+    let mut buffer2: &mut [f32] = &mut [0.0; 1024];
 
     // Transpose the image so we can run DCT on the X axis (columns) first.
     transpose(buffer1, &mut buffer2, 32, 32);
@@ -179,16 +189,16 @@ fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -
         .take(8)
         // But only take the first 8 elements (columns) from each row.
         .map(|chunk| chunk.chunks(8).take(1))
-        // Flatten the 8x8 selection down to a vector of f64's.
+        // Flatten the 8x8 selection down to a vector of floats.
         .flatten()
         .flatten()
         .copied()
-        .collect::<Vec<f64>>();
+        .collect::<Vec<f32>>();
 
     // Calculate average (median) of the DCT low frequency vector.
     let mut dct_low_freq_copy = dct_low_freq.clone();
     dct_low_freq_copy.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median: f64 = (dct_low_freq_copy[31] + dct_low_freq_copy[32]) / 2.0;
+    let median: f32 = (dct_low_freq_copy[31] + dct_low_freq_copy[32]) / 2.0;
 
     // Construct hash vector by reducing DCT values to 1 or 0 by comparing terms vs median.
     let hashvec: Vec<u64> = dct_low_freq
@@ -205,4 +215,46 @@ fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -
         println!("{:08x}", hash);
     }
     Ok(())
+}
+
+/// Use these instead:
+///         L = R * 299/1000 + G * 587/1000 + B * 114/1000
+const SRGB_LUMA: [f32; 3] = [299.0 / 1000.0, 587.0 / 1000.0, 114.0 / 1000.0];
+
+#[inline]
+fn rgb_to_luma(rgb: &[u8]) -> u8 {
+    let l = SRGB_LUMA[0] * rgb[0].to_f32().unwrap()
+        + SRGB_LUMA[1] * rgb[1].to_f32().unwrap()
+        + SRGB_LUMA[2] * rgb[2].to_f32().unwrap();
+    NumCast::from(l.round()).unwrap()
+}
+
+/// Convert the supplied image to grayscale. Alpha channel is discarded.
+///
+/// This is a customized implemententation of the grayscale feature from the `image` crate.
+/// This allows us to:
+/// - use RGB->LUMA constants that match those used by the Python Pillow package.
+/// - round the luma floating point value to the nearest integer rather than truncating.
+///
+/// See also: https://github.com/image-rs/image/issues/1554
+fn grayscale(image: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+    let (width, height) = image.dimensions();
+    let mut out = ImageBuffer::new(width, height);
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = image.get_pixel(x, y);
+
+            let mut pix = Luma([Zero::zero()]);
+            let gray = pix.channels_mut();
+            let rgb = pixel.channels();
+            gray[0] = rgb_to_luma(rgb);
+
+            let pixel = Luma::from_slice(gray); //.into_color(); // no-op for luma->luma
+
+            out.put_pixel(x, y, *pixel);
+        }
+    }
+
+    out
 }
