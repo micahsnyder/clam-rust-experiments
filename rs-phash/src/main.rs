@@ -1,16 +1,9 @@
-extern crate image;
-
-use num_traits::{FromPrimitive, NumCast, ToPrimitive, Zero};
+use num_traits::{NumCast, ToPrimitive, Zero};
 
 use anyhow::{anyhow, Result};
-use image::{
-    imageops::FilterType::Lanczos3, DynamicImage, GrayImage, ImageBuffer, Luma, Pixel, Rgb,
-};
+use image::{imageops::FilterType::Lanczos3, DynamicImage, ImageBuffer, Luma, Pixel, Rgb};
 use rustdct::DctPlanner;
-use std::{
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 use structopt::StructOpt;
 use transpose::transpose;
 
@@ -206,14 +199,28 @@ fn print_phash_from_img_path(path: &Path, include_filename: bool, debug: bool) -
         .map(|x| if x > median { 1 } else { 0 })
         .collect();
 
-    // Construct hash integer from bits.
-    let hash: u64 = hashvec.iter().fold(0, |res, &bit| (res << 1) ^ bit);
+    // Construct hash vec<u8> from bits.
+    // hashvec.reverse();
+    let hash_bytes: Vec<u8> = hashvec
+        .chunks(8)
+        .map_while(|chunk| {
+            let chunk = chunk.to_owned();
+            chunk
+                .iter()
+                .rev()
+                .enumerate()
+                .fold(None, |accum, (n, val)| {
+                    accum.or(Some(0)).map(|accum| accum | ((*val as u8) << n))
+                })
+        })
+        .collect();
 
     if include_filename && debug {
-        println!("{:?}: {:08x}", &path, hash);
-    } else {
-        println!("{:08x}", hash);
+        print!("{:?}: ", &path);
     }
+
+    println!("{}", hex::encode(&hash_bytes));
+
     Ok(())
 }
 
